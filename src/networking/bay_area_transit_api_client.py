@@ -1,10 +1,11 @@
-import os
-from enum import Enum
 from .exceptions import HTTPException
+import json
+import zlib
 
 TRANSIT_API_HOST = "http://api.511.org"
 
-class TransitAgency(str, Enum):
+
+class TransitAgency(str):
     """
     Enum for transit agencies in the bay area.
 
@@ -79,11 +80,30 @@ class BayAreaTransitClient:
         url: str,
         params: dict | None = None,
     ):
-        resp = self._requests.get(url, params=params)
+        if params:
+            query_string = "&".join([f"{key}={val}" for key, val in params.items()])
+            url = f"{url}?{query_string}"
+
+        resp = self._requests.get(url)
 
         if resp.status_code != 200:
-            raise HTTPException(f"Received non-ok status code from {url}: {resp.status_code}")
-        
+            raise HTTPException(
+                f"Received non-ok status code from {url}: {resp.status_code}"
+            )
+
+        if (
+            "content-encoding" in resp.headers
+            and resp.headers["content-encoding"] == "gzip"
+        ):
+            content = resp.content
+            text = zlib.decompress(content, 31)
+        else:
+            text = resp.text
+
+        if text[0] == "\ufeff":
+            text = resp.text[1:]
+
+        resp = json.loads(text)
         return resp
 
     def get_real_time_arrival_departures(
@@ -94,11 +114,13 @@ class BayAreaTransitClient:
         url = f"{TRANSIT_API_HOST}/transit/StopMonitoring"
         params = {
             "api_key": self._api_key,
-            "agency": agency.value,
+            "agency": agency,
             "format": "JSON",
         }
 
         resp = self.__make_request(url=url, params=params)
+
+        return resp
 
     def get_stops_for_agency(
         self,
@@ -113,7 +135,7 @@ class BayAreaTransitClient:
         url = f"{TRANSIT_API_HOST}/transit/stops"
         params = {
             "api_key": self._api_key,
-            "agency": agency.value,
+            "operator_id": agency,
             "format": "JSON",
         }
 
@@ -156,17 +178,19 @@ class BayAreaTransitClient:
 
         return_values = {ps: [] for ps in parent_stations}
         for stop in stops:
-            ps = stop["Extensions"].get("ParentStations")
-            if not ps in parent_stations:
+            ps = stop["Extensions"].get("ParentStation")
+            if ps not in parent_stations:
                 continue
 
-            return_values[ps].append({
-                "agency": agency,
-                "id": stop["id"],
-                "name": stop["Name"],
-                "parent_station": ps,
-                "longitude": float(stop["Location"]["Longitude"]),
-                "latitude": float(stop["Location"]["Latitude"]),
-            })
-        
+            return_values[ps].append(
+                {
+                    "agency": agency,
+                    "id": int(stop["id"]),
+                    "name": stop["Name"],
+                    "parent_station": ps,
+                    "longitude": float(stop["Location"]["Longitude"]),
+                    "latitude": float(stop["Location"]["Latitude"]),
+                }
+            )
+
         return return_values
